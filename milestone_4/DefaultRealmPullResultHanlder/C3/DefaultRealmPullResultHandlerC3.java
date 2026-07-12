@@ -1,0 +1,880 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing,
+ * software distributed under the License is distributed on an
+ * "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+ * KIND, either express or implied.  See the License for the
+ * specific language governing permissions and limitations
+ * under the License.
+ */
+package org.apache.syncope.core.provisioning.java.pushpull;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import org.apache.commons.lang3.exception.ExceptionUtils;
+import org.apache.syncope.common.lib.SyncopeClientException;
+import org.apache.syncope.common.lib.SyncopeConstants;
+import org.apache.syncope.common.lib.to.OrgUnit;
+import org.apache.syncope.common.lib.to.ProvisioningReport;
+import org.apache.syncope.common.lib.to.RealmTO;
+import org.apache.syncope.common.lib.types.AnyTypeKind;
+import org.apache.syncope.common.lib.types.ClientExceptionType;
+import org.apache.syncope.common.lib.types.MatchingRule;
+import org.apache.syncope.common.lib.types.OpEvent;
+import org.apache.syncope.common.lib.types.PullMode;
+import org.apache.syncope.common.lib.types.ResourceOperation;
+import org.apache.syncope.common.lib.types.UnmatchingRule;
+import org.apache.syncope.core.persistence.api.dao.AnySearchDAO;
+import org.apache.syncope.core.persistence.api.dao.CASSPClientAppDAO;
+import org.apache.syncope.core.persistence.api.dao.OIDCRPClientAppDAO;
+import org.apache.syncope.core.persistence.api.dao.SAML2SPClientAppDAO;
+import org.apache.syncope.core.persistence.api.dao.TaskDAO;
+import org.apache.syncope.core.persistence.api.dao.search.AnyCond;
+import org.apache.syncope.core.persistence.api.dao.search.AttrCond;
+import org.apache.syncope.core.persistence.api.dao.search.SearchCond;
+import org.apache.syncope.core.persistence.api.entity.ExternalResource;
+import org.apache.syncope.core.persistence.api.entity.Realm;
+import org.apache.syncope.core.persistence.api.entity.task.PullTask;
+import org.apache.syncope.core.provisioning.api.PropagationByResource;
+import org.apache.syncope.core.provisioning.api.job.JobExecutionException;
+import org.apache.syncope.core.provisioning.api.propagation.PropagationException;
+import org.apache.syncope.core.provisioning.api.propagation.PropagationManager;
+import org.apache.syncope.core.provisioning.api.propagation.PropagationTaskInfo;
+import org.apache.syncope.core.provisioning.api.pushpull.IgnoreProvisionException;
+import org.apache.syncope.core.provisioning.api.pushpull.InboundActions;
+import org.apache.syncope.core.provisioning.api.pushpull.RealmPullResultHandler;
+import org.apache.syncope.core.provisioning.java.utils.ConnObjectUtils;
+import org.apache.syncope.core.spring.security.AuthContextUtils;
+import org.apache.syncope.core.spring.security.DelegatedAdministrationException;
+import org.identityconnectors.framework.common.objects.SyncDelta;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.transaction.annotation.Transactional;
+
+@Transactional(rollbackFor = Throwable.class)
+public class DefaultRealmPullResultHandler
+        extends AbstractRealmResultHandler<PullTask, InboundActions>
+        implements RealmPullResultHandler {
+
+    private static final String MSG_COULD_NOT_UPDATE_REALM = "Could not update Realm {}";
+    private static final String MSG_PULLTASK_NOT_CONFIGURED_UPDATE = "PullTask not configured for update";
+    private static final String MSG_SUCCESSFULLY_UPDATED = "{} successfully updated";
+    private static final String MSG_COULD_NOT_PROPAGATE_REALM = "Could not propagate Realm {}";
+
+    protected InboundMatcher inboundMatcher;
+    protected ConnObjectUtils connObjectUtils;
+    protected AnySearchDAO searchDAO;
+    protected TaskDAO taskDAO;
+    protected CASSPClientAppDAO casSPClientAppDAO;
+    protected OIDCRPClientAppDAO oidcRPClientAppDAO;
+    protected SAML2SPClientAppDAO saml2SPClientAppDAO;
+
+    // Utilizziamo l'Injection tramite Setter per rimuovere lo smell (java:S6813)
+    // mantenendo intatta la compatibilità con Mockito e con la superclasse.
+    @Autowired
+    public void setInboundMatcher(final InboundMatcher inboundMatcher) {
+        this.inboundMatcher = inboundMatcher;
+    }
+
+    @Autowired
+    public void setConnObjectUtils(final ConnObjectUtils connObjectUtils) {
+        this.connObjectUtils = connObjectUtils;
+    }
+
+    @Autowired
+    public void setSearchDAO(final AnySearchDAO searchDAO) {
+        this.searchDAO = searchDAO;
+    }
+
+    @Autowired
+    public void setTaskDAO(final TaskDAO taskDAO) {
+        this.taskDAO = taskDAO;
+    }
+
+    @Autowired
+    public void setCasSPClientAppDAO(final CASSPClientAppDAO casSPClientAppDAO) {
+        this.casSPClientAppDAO = casSPClientAppDAO;
+    }
+
+    @Autowired
+    public void setOidcRPClientAppDAO(final OIDCRPClientAppDAO oidcRPClientAppDAO) {
+        this.oidcRPClientAppDAO = oidcRPClientAppDAO;
+    }
+
+    @Autowired
+    public void setSaml2SPClientAppDAO(final SAML2SPClientAppDAO saml2SPClientAppDAO) {
+        this.saml2SPClientAppDAO = saml2SPClientAppDAO;
+    }
+
+    @Override
+    public boolean handle(final SyncDelta delta) {
+        try {
+            OrgUnit orgUnit = Optional.ofNullable(profile.getTask().getResource().getOrgUnit()).
+                    orElseThrow(() -> new JobExecutionException(
+                            "No orgUnit found on " + profile.getTask().getResource() + " for "
+                                    + delta.getObject().getObjectClass()));
+
+            OpEvent.Outcome latestResult = doHandle(delta, orgUnit);
+
+            LOG.debug("Successfully handled {}", delta);
+
+            if (stopRequested) {
+                LOG.debug("Stop was requested");
+                return false;
+            }
+
+            if (profile.getTask().getPullMode() != PullMode.INCREMENTAL) {
+                return true;
+            }
+
+            return latestResult == OpEvent.Outcome.SUCCESS;
+        } catch (IgnoreProvisionException e) {
+            ProvisioningReport ignoreResult = new ProvisioningReport();
+            ignoreResult.setOperation(ResourceOperation.NONE);
+            ignoreResult.setStatus(ProvisioningReport.Status.IGNORE);
+            ignoreResult.setAnyType(SyncopeConstants.REALM_ANYTYPE);
+            ignoreResult.setKey(null);
+            ignoreResult.setName(delta.getObject().getName().getNameValue());
+            profile.getResults().add(ignoreResult);
+
+            LOG.warn("Ignoring during pull", e);
+
+            return true;
+        } catch (JobExecutionException e) {
+            LOG.error("Pull failed", e);
+
+            return false;
+        }
+    }
+
+    protected void throwIgnoreProvisionException(final SyncDelta delta, final Exception exception) {
+        if (exception instanceof IgnoreProvisionException) {
+            throw IgnoreProvisionException.class.cast(exception);
+        }
+
+        IgnoreProvisionException ipe = null;
+        for (InboundActions action : profile.getActions()) {
+            if (ipe == null) {
+                ipe = action.onError(profile, delta, exception);
+            }
+        }
+        if (ipe != null) {
+            throw ipe;
+        }
+    }
+
+    protected OpEvent.Outcome assign(final SyncDelta delta, final OrgUnit orgUnit) throws JobExecutionException {
+        if (!profile.getTask().isPerformCreate()) {
+            LOG.debug("PullTask not configured for create");
+            end(Optional.empty(),
+                    UnmatchingRule.toOp(UnmatchingRule.ASSIGN),
+                    OpEvent.Outcome.SUCCESS,
+                    null,
+                    null,
+                    delta);
+            return OpEvent.Outcome.SUCCESS;
+        }
+
+        RealmTO realmTO = connObjectUtils.getRealmTO(delta.getObject(), orgUnit);
+        if (realmTO.getFullPath() == null) {
+            if (realmTO.getParent() == null) {
+                realmTO.setParent(profile.getTask().getDestinationRealm().getFullPath());
+            }
+
+            realmTO.setFullPath(realmTO.getParent() + '/' + realmTO.getName());
+        }
+        realmTO.getResources().add(profile.getTask().getResource().getKey());
+
+        ProvisioningReport result = new ProvisioningReport();
+        result.setOperation(ResourceOperation.CREATE);
+        result.setAnyType(SyncopeConstants.REALM_ANYTYPE);
+        result.setStatus(ProvisioningReport.Status.SUCCESS);
+        result.setName(realmTO.getFullPath());
+
+        if (profile.isDryRun()) {
+            result.setKey(null);
+            end(Optional.empty(),
+                    UnmatchingRule.toOp(UnmatchingRule.ASSIGN),
+                    OpEvent.Outcome.SUCCESS,
+                    null,
+                    null,
+                    delta);
+            return OpEvent.Outcome.SUCCESS;
+        }
+
+        for (InboundActions action : profile.getActions()) {
+            action.beforeAssign(profile, delta, realmTO);
+        }
+
+        profile.getResults().add(result);
+
+        return create(realmTO, delta, UnmatchingRule.ASSIGN, result);
+    }
+
+    protected OpEvent.Outcome provision(final SyncDelta delta, final OrgUnit orgUnit) throws JobExecutionException {
+        if (!profile.getTask().isPerformCreate()) {
+            LOG.debug("PullTask not configured for create");
+            end(Optional.empty(),
+                    UnmatchingRule.toOp(UnmatchingRule.PROVISION),
+                    OpEvent.Outcome.SUCCESS,
+                    null,
+                    null,
+                    delta);
+            return OpEvent.Outcome.SUCCESS;
+        }
+
+        RealmTO realmTO = connObjectUtils.getRealmTO(delta.getObject(), orgUnit);
+        if (realmTO.getFullPath() == null) {
+            if (realmTO.getParent() == null) {
+                realmTO.setParent(profile.getTask().getDestinationRealm().getFullPath());
+            }
+
+            realmTO.setFullPath(realmTO.getParent() + '/' + realmTO.getName());
+        }
+
+        ProvisioningReport result = new ProvisioningReport();
+        result.setOperation(ResourceOperation.CREATE);
+        result.setAnyType(SyncopeConstants.REALM_ANYTYPE);
+        result.setStatus(ProvisioningReport.Status.SUCCESS);
+        result.setName(realmTO.getFullPath());
+
+        if (profile.isDryRun()) {
+            result.setKey(null);
+            end(Optional.empty(),
+                    UnmatchingRule.toOp(UnmatchingRule.PROVISION),
+                    OpEvent.Outcome.SUCCESS,
+                    null,
+                    null,
+                    delta);
+            return OpEvent.Outcome.SUCCESS;
+        }
+
+        for (InboundActions action : profile.getActions()) {
+            action.beforeProvision(profile, delta, realmTO);
+        }
+
+        profile.getResults().add(result);
+
+        return create(realmTO, delta, UnmatchingRule.PROVISION, result);
+    }
+
+    protected OpEvent.Outcome create(
+            final RealmTO realmTO,
+            final SyncDelta delta,
+            final UnmatchingRule unmatchingRule,
+            final ProvisioningReport result)
+            throws JobExecutionException {
+
+        Object output;
+        OpEvent.Outcome resultStatus;
+
+        try {
+            Realm realm = realmDAO.save(binder.create(profile.getTask().getDestinationRealm(), realmTO));
+
+            PropagationByResource<String> propByRes = new PropagationByResource<>();
+            propByRes.addAll(
+                    ResourceOperation.CREATE,
+                    realm.getResources().stream().map(ExternalResource::getKey).toList());
+            if (unmatchingRule == UnmatchingRule.ASSIGN) {
+                List<PropagationTaskInfo> taskInfos = propagationManager.createTasks(realm, propByRes, null);
+                taskExecutor.execute(taskInfos, false, securityProperties.getAdminUser());
+            }
+
+            RealmTO actual = binder.getRealmTO(realm, true);
+
+            result.setKey(actual.getKey());
+            result.setName(profile.getTask().getDestinationRealm().getFullPath() + '/' + actual.getName());
+
+            output = actual;
+            resultStatus = OpEvent.Outcome.SUCCESS;
+
+            for (InboundActions action : profile.getActions()) {
+                action.after(profile, delta, actual, result);
+            }
+
+            LOG.debug("Realm {} successfully created", actual.getKey());
+        } catch (PropagationException e) {
+            LOG.error(MSG_COULD_NOT_PROPAGATE_REALM, delta.getUid().getUidValue(), e);
+            output = e;
+            resultStatus = OpEvent.Outcome.FAILURE;
+        } catch (Exception e) {
+            throwIgnoreProvisionException(delta, e);
+
+            result.setStatus(ProvisioningReport.Status.FAILURE);
+            result.setMessage(ExceptionUtils.getRootCauseMessage(e));
+            LOG.error("Could not create Realm {} ", delta.getUid().getUidValue(), e);
+            output = e;
+            resultStatus = OpEvent.Outcome.FAILURE;
+        }
+
+        end(Optional.of(result.getKey()), UnmatchingRule.toOp(unmatchingRule), resultStatus, null, output, delta);
+        return resultStatus;
+    }
+
+    protected OpEvent.Outcome update(final SyncDelta delta, final Realm realm, final boolean inLink)
+            throws JobExecutionException {
+
+        if (!profile.getTask().isPerformUpdate()) {
+            LOG.debug(MSG_PULLTASK_NOT_CONFIGURED_UPDATE);
+            end(Optional.empty(), MatchingRule.toOp(MatchingRule.UPDATE), OpEvent.Outcome.SUCCESS, null, null, delta);
+            return OpEvent.Outcome.SUCCESS;
+        }
+
+        LOG.debug("About to update {}", realm);
+
+        ProvisioningReport result = new ProvisioningReport();
+        result.setOperation(ResourceOperation.UPDATE);
+        result.setAnyType(SyncopeConstants.REALM_ANYTYPE);
+        result.setStatus(ProvisioningReport.Status.SUCCESS);
+        result.setKey(realm.getKey());
+        result.setName(realm.getFullPath());
+
+        OpEvent.Outcome resultStatus = OpEvent.Outcome.SUCCESS;
+        if (!profile.isDryRun()) {
+            RealmTO before = binder.getRealmTO(realm, true);
+            resultStatus = executeRealmUpdate(delta, realm, inLink, before, result);
+        }
+
+        profile.getResults().add(result);
+
+        return resultStatus;
+    }
+
+    private OpEvent.Outcome executeRealmUpdate(
+            final SyncDelta delta,
+            final Realm realm,
+            final boolean inLink,
+            final RealmTO before,
+            final ProvisioningReport result) {
+
+        Object output;
+        OpEvent.Outcome resultStatus;
+
+        try {
+            if (!inLink) {
+                for (InboundActions action : profile.getActions()) {
+                    action.beforeUpdate(profile, delta, before, null);
+                }
+            }
+
+            List<PropagationManager.PropagationAttrs> beforeAttrs = propagationManager.prepareAttrs(realm);
+
+            PropagationByResource<String> propByRes = binder.update(realm, before);
+            Realm merged = realmDAO.save(realm);
+            RealmTO updated = binder.getRealmTO(merged, true);
+
+            List<PropagationTaskInfo> taskInfos = propagationManager.setAttributeDeltas(
+                    propagationManager.createTasks(merged, propByRes, null),
+                    beforeAttrs);
+            taskExecutor.execute(taskInfos, false, securityProperties.getAdminUser());
+
+            for (InboundActions action : profile.getActions()) {
+                action.after(profile, delta, updated, result);
+            }
+
+            output = updated;
+            resultStatus = OpEvent.Outcome.SUCCESS;
+            result.setName(updated.getFullPath());
+
+            LOG.debug(MSG_SUCCESSFULLY_UPDATED, updated);
+        } catch (PropagationException e) {
+            LOG.error(MSG_COULD_NOT_PROPAGATE_REALM, delta.getUid().getUidValue(), e);
+            output = e;
+            resultStatus = OpEvent.Outcome.FAILURE;
+        } catch (Exception e) {
+            throwIgnoreProvisionException(delta, e);
+
+            result.setStatus(ProvisioningReport.Status.FAILURE);
+            result.setMessage(ExceptionUtils.getRootCauseMessage(e));
+            LOG.error(MSG_COULD_NOT_UPDATE_REALM, delta.getUid().getUidValue(), e);
+            output = e;
+            resultStatus = OpEvent.Outcome.FAILURE;
+        }
+
+        end(Optional.of(realm.getKey()),
+                MatchingRule.toOp(MatchingRule.UPDATE),
+                resultStatus,
+                before,
+                output,
+                delta);
+
+        return resultStatus;
+    }
+
+    protected OpEvent.Outcome deprovision(final SyncDelta delta, final Realm realm, final boolean unlink)
+            throws JobExecutionException {
+
+        if (!profile.getTask().isPerformUpdate()) {
+            LOG.debug(MSG_PULLTASK_NOT_CONFIGURED_UPDATE);
+            end(Optional.empty(),
+                    unlink ? MatchingRule.toOp(MatchingRule.UNASSIGN) : MatchingRule.toOp(MatchingRule.DEPROVISION),
+                    OpEvent.Outcome.SUCCESS,
+                    null,
+                    null,
+                    delta);
+            return OpEvent.Outcome.SUCCESS;
+        }
+
+        LOG.debug("About to deprovision {}", realm);
+
+        ProvisioningReport result = new ProvisioningReport();
+        result.setOperation(ResourceOperation.DELETE);
+        result.setAnyType(SyncopeConstants.REALM_ANYTYPE);
+        result.setStatus(ProvisioningReport.Status.SUCCESS);
+        result.setKey(realm.getKey());
+        result.setName(realm.getFullPath());
+
+        OpEvent.Outcome resultStatus = OpEvent.Outcome.SUCCESS;
+        if (!profile.isDryRun()) {
+            RealmTO before = binder.getRealmTO(realm, true);
+            resultStatus = executeRealmDeprovision(delta, realm, unlink, before, result);
+        }
+
+        profile.getResults().add(result);
+
+        return resultStatus;
+    }
+
+    private OpEvent.Outcome executeRealmDeprovision(
+            final SyncDelta delta,
+            final Realm realm,
+            final boolean unlink,
+            final RealmTO before,
+            final ProvisioningReport result) {
+
+        Object output;
+        OpEvent.Outcome resultStatus;
+
+        try {
+            if (unlink) {
+                for (InboundActions action : profile.getActions()) {
+                    action.beforeUnassign(profile, delta, before);
+                }
+            } else {
+                for (InboundActions action : profile.getActions()) {
+                    action.beforeDeprovision(profile, delta, before);
+                }
+            }
+
+            PropagationByResource<String> propByRes = new PropagationByResource<>();
+            propByRes.add(ResourceOperation.DELETE, profile.getTask().getResource().getKey());
+            taskExecutor.execute(
+                    propagationManager.createTasks(realm, propByRes, null),
+                    false, securityProperties.getAdminUser());
+
+            RealmTO realmTO;
+            if (unlink) {
+                realm.getResources().remove(profile.getTask().getResource());
+                realmTO = binder.getRealmTO(realmDAO.save(realm), true);
+            } else {
+                realmTO = binder.getRealmTO(realm, true);
+            }
+            output = realmTO;
+
+            for (InboundActions action : profile.getActions()) {
+                action.after(profile, delta, realmTO, result);
+            }
+
+            resultStatus = OpEvent.Outcome.SUCCESS;
+
+            LOG.debug(MSG_SUCCESSFULLY_UPDATED, realm);
+        } catch (PropagationException e) {
+            LOG.error(MSG_COULD_NOT_PROPAGATE_REALM, delta.getUid().getUidValue(), e);
+            output = e;
+            resultStatus = OpEvent.Outcome.FAILURE;
+        } catch (Exception e) {
+            throwIgnoreProvisionException(delta, e);
+
+            result.setStatus(ProvisioningReport.Status.FAILURE);
+            result.setMessage(ExceptionUtils.getRootCauseMessage(e));
+            LOG.error(MSG_COULD_NOT_UPDATE_REALM, delta.getUid().getUidValue(), e);
+            output = e;
+            resultStatus = OpEvent.Outcome.FAILURE;
+        }
+
+        end(Optional.of(result.getKey()),
+                unlink ? MatchingRule.toOp(MatchingRule.UNASSIGN) : MatchingRule.toOp(MatchingRule.DEPROVISION),
+                resultStatus,
+                before,
+                output,
+                delta);
+
+        return resultStatus;
+    }
+
+    protected OpEvent.Outcome link(final SyncDelta delta, final Realm realm, final boolean unlink)
+            throws JobExecutionException {
+
+        if (!profile.getTask().isPerformUpdate()) {
+            LOG.debug(MSG_PULLTASK_NOT_CONFIGURED_UPDATE);
+            end(Optional.empty(),
+                    unlink ? MatchingRule.toOp(MatchingRule.UNLINK) : MatchingRule.toOp(MatchingRule.LINK),
+                    OpEvent.Outcome.SUCCESS,
+                    null,
+                    null,
+                    delta);
+            return OpEvent.Outcome.SUCCESS;
+        }
+
+        LOG.debug("About to link {}", realm);
+
+        ProvisioningReport result = new ProvisioningReport();
+        result.setOperation(ResourceOperation.NONE);
+        result.setAnyType(SyncopeConstants.REALM_ANYTYPE);
+        result.setStatus(ProvisioningReport.Status.SUCCESS);
+        result.setKey(realm.getKey());
+        result.setName(realm.getFullPath());
+
+        OpEvent.Outcome resultStatus = OpEvent.Outcome.SUCCESS;
+        if (!profile.isDryRun()) {
+            RealmTO before = binder.getRealmTO(realm, true);
+            resultStatus = executeRealmLink(delta, realm, unlink, before, result);
+        }
+
+        profile.getResults().add(result);
+
+        return resultStatus;
+    }
+
+    private OpEvent.Outcome executeRealmLink(
+            final SyncDelta delta,
+            final Realm realm,
+            final boolean unlink,
+            final RealmTO before,
+            final ProvisioningReport result) {
+
+        Object output;
+        OpEvent.Outcome resultStatus;
+
+        try {
+            if (unlink) {
+                for (InboundActions action : profile.getActions()) {
+                    action.beforeUnlink(profile, delta, before);
+                }
+            } else {
+                for (InboundActions action : profile.getActions()) {
+                    action.beforeLink(profile, delta, before);
+                }
+            }
+
+            if (unlink) {
+                realm.getResources().remove(profile.getTask().getResource());
+            } else {
+                realm.add(profile.getTask().getResource());
+            }
+            output = update(delta, realm, true);
+
+            resultStatus = OpEvent.Outcome.SUCCESS;
+
+            LOG.debug(MSG_SUCCESSFULLY_UPDATED, realm);
+        } catch (PropagationException e) {
+            LOG.error(MSG_COULD_NOT_PROPAGATE_REALM, delta.getUid().getUidValue(), e);
+            output = e;
+            resultStatus = OpEvent.Outcome.FAILURE;
+        } catch (Exception e) {
+            throwIgnoreProvisionException(delta, e);
+
+            result.setStatus(ProvisioningReport.Status.FAILURE);
+            result.setMessage(ExceptionUtils.getRootCauseMessage(e));
+            LOG.error(MSG_COULD_NOT_UPDATE_REALM, delta.getUid().getUidValue(), e);
+            output = e;
+            resultStatus = OpEvent.Outcome.FAILURE;
+        }
+
+        end(Optional.of(result.getKey()),
+                unlink ? MatchingRule.toOp(MatchingRule.UNLINK) : MatchingRule.toOp(MatchingRule.LINK),
+                resultStatus,
+                before,
+                output,
+                delta);
+
+        return resultStatus;
+    }
+
+    protected OpEvent.Outcome delete(final SyncDelta delta, final Realm realm) {
+        if (!profile.getTask().isPerformDelete()) {
+            LOG.debug("PullTask not configured for delete");
+            end(Optional.empty(),
+                    ResourceOperation.DELETE.name().toLowerCase(),
+                    OpEvent.Outcome.SUCCESS,
+                    null,
+                    null,
+                    delta);
+            return OpEvent.Outcome.SUCCESS;
+        }
+
+        LOG.debug("About to delete {}", realm);
+        OpEvent.Outcome resultStatus = OpEvent.Outcome.FAILURE;
+        ProvisioningReport result = new ProvisioningReport();
+
+        RealmTO before = binder.getRealmTO(realm, true);
+        try {
+            result.setKey(realm.getKey());
+            result.setName(realm.getFullPath());
+            result.setOperation(ResourceOperation.DELETE);
+            result.setAnyType(SyncopeConstants.REALM_ANYTYPE);
+            result.setStatus(ProvisioningReport.Status.SUCCESS);
+
+            if (!profile.isDryRun()) {
+                for (InboundActions action : profile.getActions()) {
+                    action.beforeDelete(profile, delta, before);
+                }
+                resultStatus = doDeleteRealm(realm, delta, before, result);
+            }
+            profile.getResults().add(result);
+        } catch (DelegatedAdministrationException e) {
+            LOG.error("Not allowed to read Realm {}", realm, e);
+        } catch (Exception e) {
+            LOG.error("Could not delete Realm {}", realm, e);
+        }
+
+        return resultStatus;
+    }
+
+    private OpEvent.Outcome doDeleteRealm(
+            final Realm realm,
+            final SyncDelta delta,
+            final RealmTO before,
+            final ProvisioningReport result) {
+
+        Object output = null;
+        OpEvent.Outcome resultStatus = OpEvent.Outcome.FAILURE;
+
+        try {
+            if (!realmSearchDAO.findChildren(realm).isEmpty()) {
+                throw SyncopeClientException.build(ClientExceptionType.RealmContains);
+            }
+
+            Set<String> adminRealms = Set.of(realm.getFullPath());
+            AnyCond keyCond = new AnyCond(AttrCond.Type.ISNOTNULL);
+            keyCond.setSchema("key");
+            SearchCond allMatchingCond = SearchCond.of(keyCond);
+            long users = searchDAO.count(
+                    realmDAO.getRoot(), true, adminRealms, allMatchingCond, AnyTypeKind.USER);
+            long groups = searchDAO.count(
+                    realmDAO.getRoot(), true, adminRealms, allMatchingCond, AnyTypeKind.GROUP);
+            long anyObjects = searchDAO.count(
+                    realmDAO.getRoot(), true, adminRealms, allMatchingCond, AnyTypeKind.ANY_OBJECT);
+            long macroTasks = taskDAO.findByRealm(realm).size();
+            long clientApps = (long) casSPClientAppDAO.findAllByRealm(realm).size()
+                    + saml2SPClientAppDAO.findAllByRealm(realm).size()
+                    + oidcRPClientAppDAO.findAllByRealm(realm).size();
+
+            if (users + groups + anyObjects + macroTasks + clientApps > 0) {
+                SyncopeClientException realmContains =
+                        SyncopeClientException.build(ClientExceptionType.RealmContains);
+                realmContains.getElements().add(users + " user(s)");
+                realmContains.getElements().add(groups + " group(s)");
+                realmContains.getElements().add(anyObjects + " anyObject(s)");
+                realmContains.getElements().add(macroTasks + " command task(s)");
+                realmContains.getElements().add(clientApps + " client app(s)");
+                throw realmContains;
+            }
+
+            PropagationByResource<String> propByRes = new PropagationByResource<>();
+            propByRes.addAll(
+                    ResourceOperation.DELETE,
+                    realm.getResources().stream().map(ExternalResource::getKey).toList());
+            List<PropagationTaskInfo> taskInfos = propagationManager.createTasks(realm, propByRes, null);
+            taskExecutor.execute(taskInfos, false, securityProperties.getAdminUser());
+
+            realmDAO.delete(realm);
+
+            output = null;
+            resultStatus = OpEvent.Outcome.SUCCESS;
+
+            for (InboundActions action : profile.getActions()) {
+                action.after(profile, delta, before, result);
+            }
+        } catch (Exception e) {
+            throwIgnoreProvisionException(delta, e);
+
+            result.setStatus(ProvisioningReport.Status.FAILURE);
+            result.setMessage(ExceptionUtils.getRootCauseMessage(e));
+            LOG.error("Could not delete {}", realm, e);
+            output = e;
+        }
+
+        end(Optional.of(result.getKey()),
+                ResourceOperation.DELETE.name().toLowerCase(),
+                resultStatus,
+                before,
+                output,
+                delta);
+
+        return resultStatus;
+    }
+
+    protected OpEvent.Outcome ignore(final SyncDelta delta, final boolean matching) {
+        LOG.debug("Any to ignore {}", delta.getObject().getUid().getUidValue());
+
+        ProvisioningReport report = new ProvisioningReport();
+        report.setKey(null);
+        report.setName(delta.getObject().getUid().getUidValue());
+        report.setOperation(ResourceOperation.NONE);
+        report.setAnyType(SyncopeConstants.REALM_ANYTYPE);
+        report.setStatus(ProvisioningReport.Status.SUCCESS);
+        profile.getResults().add(report);
+
+        if (!profile.isDryRun()) {
+            end(Optional.empty(),
+                    matching ? MatchingRule.toOp(MatchingRule.IGNORE) : UnmatchingRule.toOp(UnmatchingRule.IGNORE),
+                    OpEvent.Outcome.SUCCESS,
+                    null,
+                    null,
+                    delta);
+            return OpEvent.Outcome.SUCCESS;
+        }
+
+        return OpEvent.Outcome.SUCCESS;
+    }
+
+    protected OpEvent.Outcome doHandle(final SyncDelta delta, final OrgUnit orgUnit) throws JobExecutionException {
+        LOG.debug("Process {} for {} as {}",
+                delta.getDeltaType(), delta.getUid().getUidValue(), delta.getObject().getObjectClass());
+
+        SyncDelta finalDelta = delta;
+        for (InboundActions action : profile.getActions()) {
+            finalDelta = action.preprocess(profile, finalDelta);
+        }
+
+        LOG.debug("Transformed {} for {} as {}",
+                finalDelta.getDeltaType(), finalDelta.getUid().getUidValue(), finalDelta.getObject().getObjectClass());
+
+        List<Realm> realms = inboundMatcher.match(finalDelta, orgUnit);
+        LOG.debug("Match found for {} as {}: {}",
+                finalDelta.getUid().getUidValue(), finalDelta.getObject().getObjectClass(), realms);
+
+        // RIPRISTINATO: L'early return originale. Senza questo blocco, il comportamento della classe
+        // viene modificato rompendo i test BB che assumevano il ritorno esplicito in questo scenario.
+        if (realms.isEmpty()) {
+            LOG.debug("Nothing to do");
+            return OpEvent.Outcome.SUCCESS;
+        }
+
+        Realm realm = realms.getFirst();
+        if (realms.size() > 1) {
+            switch (profile.getConflictResolutionAction()) {
+                case IGNORE:
+                    throw new IgnoreProvisionException("More than one match found for "
+                            + finalDelta.getObject().getUid().getUidValue() + ": " + realms);
+
+                case LASTMATCH:
+                    realm = realms.getLast();
+                    break;
+
+                case FIRSTMATCH:
+                default:
+            }
+        }
+
+        return processDeltaType(finalDelta, orgUnit, realms, realm);
+    }
+
+    private OpEvent.Outcome processDeltaType(
+            final SyncDelta delta,
+            final OrgUnit orgUnit,
+            final List<Realm> realms,
+            final Realm realm) throws JobExecutionException {
+
+        OpEvent.Outcome result = OpEvent.Outcome.SUCCESS;
+
+        try {
+            switch (delta.getDeltaType()) {
+                case CREATE, UPDATE, CREATE_OR_UPDATE:
+                    if (realms.isEmpty()) {
+                        switch (profile.getTask().getUnmatchingRule()) {
+                            case ASSIGN:
+                                result = assign(delta, orgUnit);
+                                break;
+                            case PROVISION:
+                                result = provision(delta, orgUnit);
+                                break;
+                            case IGNORE:
+                                result = ignore(delta, false);
+                                break;
+                            default:
+                                // do nothing
+                        }
+                    } else {
+                        switch (profile.getTask().getMatchingRule()) {
+                            case UPDATE:
+                                result = update(delta, realm, false);
+                                break;
+                            case DEPROVISION:
+                                result = deprovision(delta, realm, false);
+                                break;
+                            case UNASSIGN:
+                                result = deprovision(delta, realm, true);
+                                break;
+                            case LINK:
+                                result = link(delta, realm, false);
+                                break;
+                            case UNLINK:
+                                result = link(delta, realm, true);
+                                break;
+                            case IGNORE:
+                                result = ignore(delta, true);
+                                break;
+                            default:
+                                // do nothing
+                        }
+                    }
+                    break;
+
+                case DELETE:
+                    result = delete(delta, realm);
+                    break;
+
+                default:
+            }
+        } catch (IllegalStateException | IllegalArgumentException e) {
+            LOG.warn(e.getMessage());
+        }
+
+        return result;
+    }
+
+    protected void end(
+            final Optional<String> key,
+            final String event,
+            final OpEvent.Outcome result,
+            final Object before,
+            final Object output,
+            final SyncDelta delta) {
+
+        key.ifPresent(realmDAO::evict);
+
+        notificationManager.createTasks(
+                AuthContextUtils.getWho(),
+                OpEvent.CategoryType.PULL,
+                SyncopeConstants.REALM_ANYTYPE.toLowerCase(),
+                profile.getTask().getResource().getKey(),
+                event,
+                result,
+                before,
+                output,
+                delta);
+
+        auditManager.audit(
+                AuthContextUtils.getDomain(),
+                AuthContextUtils.getWho(),
+                OpEvent.CategoryType.PULL,
+                SyncopeConstants.REALM_ANYTYPE.toLowerCase(),
+                profile.getTask().getResource().getKey(),
+                event,
+                result,
+                before,
+                output,
+                delta);
+    }
+}

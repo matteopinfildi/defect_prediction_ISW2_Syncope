@@ -1,0 +1,13 @@
+﻿Dataset;Classifier;FS;Balancing;Precision;Recall;AUC;Kappa
+SYNCOPE;RandomForest;No;No;0.66;0.61;0.92;0.61
+SYNCOPE;NaiveBayes;No;No;0.19;0.29;0.71;0.15
+SYNCOPE;Ibk;No;No;0.53;0.52;0.76;0.49
+SYNCOPE;RandomForest;Yes;No;0.68;0.59;0.92;0.61
+SYNCOPE;NaiveBayes;Yes;No;0.21;0.29;0.71;0.18
+SYNCOPE;Ibk;Yes;No;0.48;0.45;0.72;0.43
+SYNCOPE;RandomForest;No;Yes;0.52;0.56;0.90;0.50
+SYNCOPE;NaiveBayes;No;Yes;0.18;0.31;0.71;0.15
+SYNCOPE;Ibk;No;Yes;0.16;0.80;0.75;0.18
+SYNCOPE;RandomForest;Yes;Yes;0.48;0.55;0.89;0.47
+SYNCOPE;NaiveBayes;Yes;Yes;0.20;0.29;0.71;0.17
+SYNCOPE;Ibk;Yes;Yes;0.15;0.77;0.73;0.16

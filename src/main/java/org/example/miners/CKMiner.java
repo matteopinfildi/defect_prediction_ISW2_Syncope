@@ -34,7 +34,7 @@ public class CKMiner {
 
             @Override
             public void notifyError(String sourceFilePath, Exception e) {
-                // Silenziamo gli errori
+                // errori silenziati
             }
         });
     }

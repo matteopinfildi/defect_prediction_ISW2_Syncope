@@ -50,11 +50,11 @@ public class App {
         List<DatasetRecord> totalDataset = new ArrayList<>();
 
         try {
-            System.out.println("1. Scaricamento Jira e Calcolo PROPORTION METHOD in corso...");
+            System.out.println("Scaricamento Jira e Calcolo PROPORTION");
             Map<String, JiraTicket> validTickets = JiraProportion.fetchAndEstimate("SYNCOPE", releases);
             System.out.println("Trovati " + validTickets.size() + " ticket validi e calcolata la stima IV.");
 
-            System.out.println("  Inizio SZZ");
+            System.out.println("Inizio SZZ");
             GitCommandRunner.runCommand(repoPath, "git", "reset", "--hard");
             GitCommandRunner.runCommand(repoPath, "git", "clean", "-fd");
 
@@ -70,9 +70,8 @@ public class App {
             if (cacheFile.exists()) {
                 allBugs = SZZLabeler.loadBugsFromCache(cachePath, validTickets);
             } else {
-                System.out.println("   [ Nessuna cache trovata.");
                 List<String> allLogLines = GitCommandRunner.runCommand(repoPath, "git", "log", "--all", "--format=%H|%s|%cI");
-                System.out.println("   [SZZ] Caricati " + allLogLines.size() + " commit storici.");
+                System.out.println("Caricati " + allLogLines.size() + " commit (SZZ).");
 
                 allBugs = SZZLabeler.extractAllBugs(repoPath, validTickets, allLogLines);
                 SZZLabeler.saveBugsToCache(allBugs, cachePath);
@@ -120,7 +119,6 @@ public class App {
                 new FileWriter(csvPath, true).close();
             } catch (Exception e) {
                 finalCsvPath = csvPath.replace(".csv", "_BACKUP_SALVATAGGIO.csv");
-                System.err.println("Nessun panico: salvo i dati in -> " + finalCsvPath + "\n");
             }
 
             try (FileWriter out = new FileWriter(finalCsvPath);
@@ -151,9 +149,8 @@ public class App {
                     );
                     if (r.getBugginess() == 1) bugTrovati++;
                 }
-                System.out.println("FINITO! Istanze difettose trovate in totale: " + bugTrovati);
+                System.out.println("Istanze difettose trovate in totale: " + bugTrovati);
                 System.out.println("Righe totali scritte nel dataset: " + totalDataset.size());
-                System.out.println("Salvataggio completato con successo in: " + finalCsvPath);
             }
 
         } catch (Exception e) {

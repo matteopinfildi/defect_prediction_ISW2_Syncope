@@ -22,7 +22,6 @@ public class JiraProportion {
         HttpClient client = HttpClient.newHttpClient();
         DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ");
 
-        System.out.println("   [PROPORTION] Scaricamento di TUTTE le release storiche per il calcolo degli indici...");
         String versionsUrl = "https://issues.apache.org/jira/rest/api/2/project/" + project + "/versions";
         HttpRequest versionsRequest = HttpRequest.newBuilder().uri(URI.create(versionsUrl)).build();
         HttpResponse<String> versionsResponse = client.send(versionsRequest, HttpResponse.BodyHandlers.ofString());
@@ -37,7 +36,7 @@ public class JiraProportion {
             }
         }
         Collections.sort(allReleases);
-        System.out.println("   [PROPORTION] Trovate " + allReleases.size() + " release storiche.");
+        System.out.println("Trovate " + allReleases.size() + " release (Proportion).");
 
         String jql = "project=\"" + project + "\" AND issueType=\"Bug\" AND (status=\"closed\" OR status=\"resolved\") AND resolution=\"fixed\"";
         String encodedJql = URLEncoder.encode(jql, StandardCharsets.UTF_8);
@@ -88,7 +87,7 @@ public class JiraProportion {
         }
 
         double pAverage = (count == 0) ? 0.0 : (sum / count);
-        System.out.println("   [PROPORTION] P-Total (Media Indici) calcolato: " + String.format(Locale.US, "%.3f", pAverage));
+        System.out.println("Proportion-Total calcolato: " + String.format(Locale.US, "%.3f", pAverage));
 
         for (JiraTicket t : tickets.values()) {
             if (t.ivDateAv != null) {

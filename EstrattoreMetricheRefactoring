@@ -1,0 +1,38 @@
+package org.example;
+
+import com.github.mauricioaniche.ck.CK;
+import com.github.mauricioaniche.ck.CKClassResult;
+import com.github.mauricioaniche.ck.CKNotifier;
+
+public class App {
+
+    public static void main(String[] args) {
+      String basePath = "C:/Users/Dell/OneDrive/Desktop/Refactoring_Evaluation/ResourceLogic/";
+//      String basePath = "C:/Users/Dell/OneDrive/Desktop/Refactoring_Evaluation/DefaultRealmPullResultHanlder/";
+
+
+        String[] varianti = {"C0", "C1", "C2", "C3", "C4"};
+
+        for (String variante : varianti) {
+            String targetPath = basePath + variante;
+            System.out.println("Vriante: " + variante);
+
+            new CK().calculate(targetPath, new CKNotifier() {
+                @Override
+                public void notify(CKClassResult result) {
+                    if (result.getClassName().contains("$")) return;
+
+                    System.out.println("LOC:  " + result.getLoc());
+                    System.out.println("WMC:  " + result.getWmc());
+                    System.out.println("RFC:  " + result.getRfc());
+                }
+
+                @Override
+                public void notifyError(String sourceFilePath, Exception e) {
+                    System.err.println("Errore in " + sourceFilePath + ": " + e.getMessage());
+                }
+            });
+            System.out.println("\n");
+        }
+    }
+}

@@ -38,9 +38,6 @@ public class SZZLabeler {
         Pattern ticketPattern = Pattern.compile("\\b[A-Z][A-Z0-9]+-\\d+\\b", Pattern.CASE_INSENSITIVE);
         Pattern hunkPattern = Pattern.compile("^@@\\s+-(\\d+)(?:,(\\d+))?\\s+\\+\\d+(?:,\\d+)?\\s+@@.*$");
 
-        System.out.println("\n   [SZZ] Estrazione bug in corso...");
-        System.out.println("   [INFO] Regex ticket impostata su: " + ticketPattern.pattern());
-
         int commitCounter = 0;
         for (String line : logLines) {
             commitCounter++;
@@ -115,7 +112,7 @@ public class SZZLabeler {
                 }
             }
         }
-        System.out.println("   SZZ completato. Trovati " + allBugs.size() + " difetti totali.");
+        System.out.println("SZZ completato. Trovati " + allBugs.size() + " difetti totali.");
         return allBugs;
     }
 
@@ -163,12 +160,11 @@ public class SZZLabeler {
         try (java.io.FileWriter fw = new java.io.FileWriter(cachePath);
              java.io.PrintWriter pw = new java.io.PrintWriter(fw)) {
             for (BuggyFile bug : bugs) {
-                // Salviamo i campi separati da un pipe (|)
                 pw.println(bug.className + "|" + bug.buggyDate + "|" + bug.fixDate + "|" + bug.ticketId);
             }
-            System.out.println("    Dati SZZ salvati con successo in: " + cachePath);
+            System.out.println("Dati SZZ salvati in: " + cachePath);
         } catch (Exception e) {
-            System.err.println("    Errore nel salvataggio della cache: " + e.getMessage());
+            System.err.println("Errore nel salvataggio della cache: " + e.getMessage());
         }
     }
 
@@ -190,7 +186,7 @@ public class SZZLabeler {
                     }
                 }
             }
-            System.out.println("   Trovato.");
+            System.out.println("Trovato.");
             return bugs;
         } catch (Exception e) {
             return null;

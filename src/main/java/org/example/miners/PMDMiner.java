@@ -23,8 +23,7 @@ public class PMDMiner {
                 pmdExecutablePath, "check", "-d", repoPath, "-R", rulesets, "-f", "csv", "-r", reportPath);
 
         if (!reportFile.exists() || reportFile.length() == 0) {
-            System.err.println("   [ERRORE PMD] Il report non è stato generato!");
-            System.err.println("   Output dell'errore: " + output);
+            System.err.println("Errore: " + output);
             return;
         }
 
@@ -49,9 +48,9 @@ public class PMDMiner {
                     }
                 }
             }
-            System.out.println("   [PMD] Analisi completata. Smell totali trovati: " + smellsFound);
+            System.out.println("Smell totali trovati: " + smellsFound);
         } catch (Exception e) {
-            System.err.println("   [ERRORE PMD] Errore lettura report: " + e.getMessage());
+            System.err.println("Errore PMD" + e.getMessage());
         } finally {
             if (reportFile.exists()) reportFile.delete();
         }
