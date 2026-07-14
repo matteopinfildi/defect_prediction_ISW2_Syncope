@@ -10,21 +10,24 @@ public class App {
       String basePath = "C:/Users/Dell/OneDrive/Desktop/Refactoring_Evaluation/ResourceLogic/";
 //      String basePath = "C:/Users/Dell/OneDrive/Desktop/Refactoring_Evaluation/DefaultRealmPullResultHanlder/";
 
-
         String[] varianti = {"C0", "C1", "C2", "C3", "C4"};
 
         for (String variante : varianti) {
             String targetPath = basePath + variante;
-            System.out.println("Vriante: " + variante);
+            System.out.println("Variante: " + variante);
 
             new CK().calculate(targetPath, new CKNotifier() {
                 @Override
                 public void notify(CKClassResult result) {
+                    // Ignora le inner classes (spesso contengono $)
                     if (result.getClassName().contains("$")) return;
 
-                    System.out.println("LOC:  " + result.getLoc());
-                    System.out.println("WMC:  " + result.getWmc());
-                    System.out.println("RFC:  " + result.getRfc());
+                    // Output delle metriche richieste
+                    System.out.println("LOC:   " + result.getLoc());
+                    System.out.println("WMC:   " + result.getWmc());
+                    System.out.println("RFC:   " + result.getRfc());
+                    System.out.println("CBO:   " + result.getCbo());
+                    System.out.println("LCOM:  " + result.getLcom());
                 }
 
                 @Override
