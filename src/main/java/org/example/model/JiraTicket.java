@@ -5,7 +5,7 @@ public class JiraTicket {
     public String id;
     public LocalDateTime ovDate;
     public LocalDateTime fvDate;
-    public LocalDateTime ivDateAv; // Da Jira
+    public LocalDateTime ivDateAv;
     public LocalDateTime estimatedIvDate;
 
     public JiraTicket(String id) { this.id = id; }
